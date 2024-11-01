@@ -1,0 +1,306 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+class GasAtom:
+    def __init__(self, name, mass, radius, color, absorption_cross_section):
+        self.name = name
+        self.mass = mass  # Atomic mass unit
+        self.radius = radius  # In Angstroms
+        self.color = color
+        self.absorption_cross_section = absorption_cross_section  # Relative value
+
+# Định nghĩa các loại khí
+GAS_TYPES = {
+    'Hydrogen': GasAtom('H2', 2.0, 0.74, 'lightblue', 0.1),
+    'Nitrogen': GasAtom('N2', 28.0, 1.12, 'lightgreen', 0.2),
+    'Oxygen': GasAtom('O2', 32.0, 1.21, 'red', 0.3),
+    'Carbon Dioxide': GasAtom('CO2', 44.0, 1.64, 'gray', 0.4),
+    'Helium': GasAtom('He', 4.0, 0.62, 'yellow', 0.05)
+}
+
+class GasMedium:
+    def __init__(self, volume_size, gas_type, n_molecules=1000):
+        self.volume_size = volume_size
+        self.n_molecules = n_molecules
+        self.gas_type = GAS_TYPES[gas_type]
+        self.reset()
+    
+    def reset(self):
+        self.positions = np.random.uniform(0, self.volume_size, (self.n_molecules, 3))
+        self.interaction_radius = self.volume_size / 50 * self.gas_type.radius
+
+class PhotonSource:
+    def __init__(self, position, direction, wavelength=532, power=1.0, 
+                 beam_width=0.1, divergence=0.1):
+        self.position = np.array(position)
+        self.direction = np.array(direction) / np.linalg.norm(direction)
+        self.wavelength = wavelength  # nm
+        self.power = power  # relative units
+        self.beam_width = beam_width
+        self.divergence = divergence
+    
+    def emit_photon(self):
+        offset = np.random.normal(0, self.beam_width, 2)
+        pos = self.position + np.array([offset[0], offset[1], 0])
+        
+        angle = np.random.normal(0, self.divergence, 2)
+        dir = self.direction + np.array([angle[0], angle[1], 0])
+        dir = dir / np.linalg.norm(dir)
+        
+        return pos, dir
+
+class PhotonBeam:
+    def __init__(self, source, gas_medium, n_photons=100):
+        self.source = source
+        self.gas_medium = gas_medium
+        self.n_photons = n_photons
+        self.reset()
+    
+    def reset(self):
+        self.positions = np.zeros((self.n_photons, 3))
+        self.directions = np.zeros((self.n_photons, 3))
+        self.active = np.ones(self.n_photons, dtype=bool)
+        
+        for i in range(self.n_photons):
+            self.positions[i], self.directions[i] = self.source.emit_photon()
+        
+        # Điều chỉnh xác suất dựa trên công suất nguồn và đặc tính khí
+        self.absorption_prob = (self.gas_medium.gas_type.absorption_cross_section * 
+                              self.source.power)
+        self.scattering_prob = 0.3  # Giá trị cơ bản cho tán xạ
+    
+    def check_collision(self, photon_pos):
+        distances = np.linalg.norm(self.gas_medium.positions - photon_pos, axis=1)
+        return np.any(distances < self.gas_medium.interaction_radius)
+    
+    def simulate_step(self):
+        for i in np.where(self.active)[0]:
+            self.positions[i] += self.directions[i]
+            
+            if self.check_collision(self.positions[i]):
+                if np.random.random() < self.absorption_prob:
+                    self.active[i] = False
+                    continue
+                
+                if np.random.random() < self.scattering_prob:
+                    theta = np.random.uniform(0, 2*np.pi)
+                    phi = np.random.uniform(0, np.pi)
+                    self.directions[i] = [
+                        np.sin(phi) * np.cos(theta),
+                        np.sin(phi) * np.sin(theta),
+                        np.cos(phi)
+                    ]
+            
+            out_of_bounds = np.any((self.positions[i] < 0) | 
+                                 (self.positions[i] > self.gas_medium.volume_size))
+            if out_of_bounds:
+                self.active[i] = False
+
+class LaserSimulation:
+    def __init__(self):
+        self.volume_size = 10
+        self.setup_controls()
+        self.setup_simulation()
+        
+    def setup_simulation(self):
+        # Tạo nguồn photon với các tham số từ controls
+        source_pos = [
+            self.source_x.value,
+            self.source_y.value,
+            self.source_z.value
+        ]
+        source_dir = [
+            self.direction_x.value,
+            self.direction_y.value,
+            self.direction_z.value
+        ]
+        
+        self.source = PhotonSource(
+            position=source_pos,
+            direction=source_dir,
+            wavelength=self.wavelength_slider.value,
+            power=self.power_slider.value,
+            beam_width=self.beam_width_slider.value,
+            divergence=self.divergence_slider.value
+        )
+        
+        self.gas = GasMedium(
+            self.volume_size,
+            self.gas_type_dropdown.value,
+            n_molecules=self.n_molecules_slider.value
+        )
+        
+        self.beam = PhotonBeam(
+            self.source,
+            self.gas,
+            n_photons=self.n_photons_slider.value
+        )
+        
+        self.fig = plt.figure(figsize=(12, 8))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.anim = None
+    
+    def setup_controls(self):
+        # Điều khiển cơ bản
+        self.play_button = widgets.Button(description="Play")
+        self.reset_button = widgets.Button(description="Reset")
+        
+        # Điều khiển môi trường khí
+        self.gas_type_dropdown = widgets.Dropdown(
+            options=list(GAS_TYPES.keys()),
+            value='Nitrogen',
+            description='Gas Type:'
+        )
+        self.n_molecules_slider = widgets.IntSlider(
+            value=500, min=100, max=1000, step=100,
+            description='Molecules:'
+        )
+        
+        # Điều khiển nguồn photon
+        self.source_x = widgets.FloatSlider(value=0, min=0, max=10, description='Source X:')
+        self.source_y = widgets.FloatSlider(value=5, min=0, max=10, description='Source Y:')
+        self.source_z = widgets.FloatSlider(value=5, min=0, max=10, description='Source Z:')
+        
+        self.direction_x = widgets.FloatSlider(value=1, min=-1, max=1, description='Dir X:')
+        self.direction_y = widgets.FloatSlider(value=0, min=-1, max=1, description='Dir Y:')
+        self.direction_z = widgets.FloatSlider(value=0, min=-1, max=1, description='Dir Z:')
+        
+        self.wavelength_slider = widgets.IntSlider(
+            value=532, min=380, max=750,
+            description='Wavelength (nm):'
+        )
+        self.power_slider = widgets.FloatSlider(
+            value=1.0, min=0.1, max=2.0, step=0.1,
+            description='Power:'
+        )
+        self.beam_width_slider = widgets.FloatSlider(
+            value=0.2, min=0.1, max=1.0, step=0.1,
+            description='Beam Width:'
+        )
+        self.divergence_slider = widgets.FloatSlider(
+            value=0.1, min=0.01, max=0.5, step=0.01,
+            description='Divergence:'
+        )
+        
+        # Điều khiển chùm tia
+        self.n_photons_slider = widgets.IntSlider(
+            value=50, min=10, max=200, step=10,
+            description='Photons:'
+        )
+        
+        # Bố trí controls
+        source_controls = widgets.VBox([
+            widgets.HBox([self.source_x, self.source_y, self.source_z]),
+            widgets.HBox([self.direction_x, self.direction_y, self.direction_z]),
+            self.wavelength_slider,
+            self.power_slider,
+            self.beam_width_slider,
+            self.divergence_slider
+        ])
+        
+        gas_controls = widgets.VBox([
+            self.gas_type_dropdown,
+            self.n_molecules_slider
+        ])
+        
+        simulation_controls = widgets.VBox([
+            widgets.HBox([self.play_button, self.reset_button]),
+            self.n_photons_slider
+        ])
+        
+        all_controls = widgets.VBox([
+            widgets.HTML("<h3>Source Controls</h3>"),
+            source_controls,
+            widgets.HTML("<h3>Gas Controls</h3>"),
+            gas_controls,
+            widgets.HTML("<h3>Simulation Controls</h3>"),
+            simulation_controls
+        ])
+        
+        self.play_button.on_click(self.play_simulation)
+        self.reset_button.on_click(self.reset_simulation)
+        
+        display(all_controls)
+    
+    def update(self, frame):
+        self.ax.clear()
+        
+        # Vẽ phân tử khí
+        self.ax.scatter(
+            self.gas.positions[:, 0],
+            self.gas.positions[:, 1],
+            self.gas.positions[:, 2],
+            c=self.gas.gas_type.color,
+            alpha=0.3, s=50,
+            label=f'{self.gas.gas_type.name} molecules'
+        )
+        
+        # Vẽ nguồn photon
+        self.ax.scatter(
+            [self.source.position[0]],
+            [self.source.position[1]],
+            [self.source.position[2]],
+            c='yellow', s=100, marker='*',
+            label='Photon source'
+        )
+        
+        # Vẽ photon active
+        active_positions = self.beam.positions[self.beam.active]
+        if len(active_positions) > 0:
+            self.ax.scatter(
+                active_positions[:, 0],
+                active_positions[:, 1],
+                active_positions[:, 2],
+                c='red', s=50,
+                label='Active photons'
+            )
+        
+        # Vẽ photon absorbed
+        absorbed_positions = self.beam.positions[~self.beam.active]
+        if len(absorbed_positions) > 0:
+            self.ax.scatter(
+                absorbed_positions[:, 0],
+                absorbed_positions[:, 1],
+                absorbed_positions[:, 2],
+                c='blue', alpha=0.3, s=30,
+                label='Absorbed photons'
+            )
+        
+        self.ax.set_xlim([0, self.volume_size])
+        self.ax.set_ylim([0, self.volume_size])
+        self.ax.set_zlim([0, self.volume_size])
+        self.ax.set_xlabel('X')
+        self.ax.set_ylabel('Y')
+        self.ax.set_zlabel('Z')
+        self.ax.set_title(
+            f'Frame {frame}\n'
+            f'Gas: {self.gas.gas_type.name}, '
+            f'λ={self.source.wavelength}nm, '
+            f'Power={self.source.power:.1f}'
+        )
+        self.ax.legend()
+        
+        self.beam.simulate_step()
+    
+    def play_simulation(self, b):
+        if self.anim is not None:
+            self.anim.event_source.stop()
+        self.anim = FuncAnimation(
+            self.fig, self.update,
+            frames=100, interval=50,
+            repeat=False
+        )
+        plt.show()
+    
+    def reset_simulation(self, b):
+        if self.anim is not None:
+            self.anim.event_source.stop()
+        plt.clf()
+        self.setup_simulation()
+
+# Khởi tạo và chạy mô phỏng
+simulation = LaserSimulation()
